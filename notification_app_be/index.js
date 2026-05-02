@@ -1,69 +1,70 @@
 const axios = require("axios");
 const { Log } = require("../logging_middleware/index");
-const { AUTH_CONFIG, BASE_URL } = require("../logging_middleware/config");
+const { CREDENTIALS, SERVER_URL } = require("../logging_middleware/config");
 
-let cachedToken = null;
-let tokenExpiry = 0;
+let activeToken = null;
+let expiresAt = 0;
 
-async function getAuthToken() {
+// refresh token if expired, otherwise return the one we already have
+async function fetchToken() {
   const now = Math.floor(Date.now() / 1000);
-  if (cachedToken && now < tokenExpiry - 60) {
-    return cachedToken;
+  if (activeToken && now < expiresAt - 60) {
+    return activeToken;
   }
-  const response = await axios.post(`${BASE_URL}/auth`, {
-    email: AUTH_CONFIG.email,
-    name: AUTH_CONFIG.name,
-    rollNo: AUTH_CONFIG.rollNo,
-    accessCode: AUTH_CONFIG.accessCode,
-    clientID: AUTH_CONFIG.clientID,
-    clientSecret: AUTH_CONFIG.clientSecret,
+  const res = await axios.post(`${SERVER_URL}/auth`, {
+    email: CREDENTIALS.email,
+    name: CREDENTIALS.name,
+    rollNo: CREDENTIALS.rollNo,
+    accessCode: CREDENTIALS.accessCode,
+    clientID: CREDENTIALS.clientID,
+    clientSecret: CREDENTIALS.clientSecret,
   });
-  cachedToken = response.data.access_token;
-  tokenExpiry = response.data.expires_in;
-  return cachedToken;
+  activeToken = res.data.access_token;
+  expiresAt = res.data.expires_in;
+  return activeToken;
 }
 
-// higher score = higher priority
-function getScore(notification) {
-  const typeWeight = {
+// placement matters most, then results, events are lowest priority
+function calcPriority(notification) {
+  const weights = {
     Placement: 3,
     Result: 2,
     Event: 1,
   };
 
-  const weight = typeWeight[notification.Type] || 0;
-  const recency = new Date(notification.Timestamp).getTime();
+  const typeScore = weights[notification.Type] || 0;
+  const timestamp = new Date(notification.Timestamp).getTime();
 
-  // normalize recency to a small number so type weight dominates
-  const recencyScore = recency / 1e13;
+  // divide timestamp so type weight stays dominant
+  const recencyBonus = timestamp / 1e13;
 
-  return weight + recencyScore;
+  return typeScore + recencyBonus;
 }
 
-// min-heap implementation
+// min-heap — keeps the lowest scoring item at the top for easy removal
 class MinHeap {
   constructor() {
-    this.heap = [];
+    this.data = [];
   }
 
   size() {
-    return this.heap.length;
+    return this.data.length;
   }
 
   peek() {
-    return this.heap[0];
+    return this.data[0];
   }
 
   push(item) {
-    this.heap.push(item);
-    this._bubbleUp(this.heap.length - 1);
+    this.data.push(item);
+    this._bubbleUp(this.data.length - 1);
   }
 
   pop() {
-    const top = this.heap[0];
-    const last = this.heap.pop();
-    if (this.heap.length > 0) {
-      this.heap[0] = last;
+    const top = this.data[0];
+    const last = this.data.pop();
+    if (this.data.length > 0) {
+      this.data[0] = last;
       this._sinkDown(0);
     }
     return top;
@@ -72,76 +73,77 @@ class MinHeap {
   _bubbleUp(i) {
     while (i > 0) {
       const parent = Math.floor((i - 1) / 2);
-      if (this.heap[parent].score <= this.heap[i].score) break;
-      [this.heap[parent], this.heap[i]] = [this.heap[i], this.heap[parent]];
+      if (this.data[parent].score <= this.data[i].score) break;
+      [this.data[parent], this.data[i]] = [this.data[i], this.data[parent]];
       i = parent;
     }
   }
 
   _sinkDown(i) {
-    const n = this.heap.length;
+    const len = this.data.length;
     while (true) {
-      let smallest = i;
+      let lowest = i;
       const left = 2 * i + 1;
       const right = 2 * i + 2;
-      if (left < n && this.heap[left].score < this.heap[smallest].score) smallest = left;
-      if (right < n && this.heap[right].score < this.heap[smallest].score) smallest = right;
-      if (smallest === i) break;
-      [this.heap[smallest], this.heap[i]] = [this.heap[i], this.heap[smallest]];
-      i = smallest;
+      if (left < len && this.data[left].score < this.data[lowest].score) lowest = left;
+      if (right < len && this.data[right].score < this.data[lowest].score) lowest = right;
+      if (lowest === i) break;
+      [this.data[lowest], this.data[i]] = [this.data[i], this.data[lowest]];
+      i = lowest;
     }
   }
 }
 
-function getTopN(notifications, n) {
+// keep heap size at N so we never sort the whole list
+function findTopNotifications(notifications, limit) {
   const heap = new MinHeap();
 
-  for (const notif of notifications) {
-    const score = getScore(notif);
-    if (heap.size() < n) {
-      heap.push({ score, notif });
+  for (const item of notifications) {
+    const score = calcPriority(item);
+    if (heap.size() < limit) {
+      heap.push({ score, item });
     } else if (score > heap.peek().score) {
       heap.pop();
-      heap.push({ score, notif });
+      heap.push({ score, item });
     }
   }
 
-  // extract and sort highest first
-  const result = [];
+  // drain heap and flip so highest priority comes first
+  const sorted = [];
   while (heap.size() > 0) {
-    result.push(heap.pop().notif);
+    sorted.push(heap.pop().item);
   }
-  return result.reverse();
+  return sorted.reverse();
 }
 
-async function run() {
+async function main() {
   try {
-    await Log("backend", "info", "service", "Fetching notifications from evaluation service");
+    await Log("backend", "info", "service", "pulling notifications from server");
 
-    const token = await getAuthToken();
-    const response = await axios.get(`${BASE_URL}/notifications`, {
+    const token = await fetchToken();
+    const res = await axios.get(`${SERVER_URL}/notifications`, {
       headers: { Authorization: `Bearer ${token}` },
     });
 
-    const notifications = response.data.notifications;
-    await Log("backend", "info", "service", `Fetched ${notifications.length} notifications successfully`);
+    const allNotifications = res.data.notifications;
+    await Log("backend", "info", "service", `loaded ${allNotifications.length} notifications`);
 
-    const topN = 10;
-    await Log("backend", "info", "controller", `Running priority inbox to find top ${topN} notifications`);
+    const limit = 10;
+    await Log("backend", "info", "controller", `building priority inbox, looking for top ${limit}`);
 
-    const topNotifications = getTopN(notifications, topN);
+    const topList = findTopNotifications(allNotifications, limit);
 
-    await Log("backend", "info", "controller", `Priority inbox computed successfully with ${topNotifications.length} results`);
+    await Log("backend", "info", "controller", `priority inbox ready, ${topList.length} items returned`);
 
-    console.log(`\n===== TOP ${topN} PRIORITY NOTIFICATIONS =====\n`);
-    topNotifications.forEach((n, i) => {
-      console.log(`${i + 1}. [${n.Type}] ${n.Message} — ${n.Timestamp}`);
+    console.log(`\n--- Top ${limit} Notifications Right Now ---\n`);
+    topList.forEach((n, idx) => {
+      console.log(`${idx + 1}. ${n.Type} | ${n.Message} | ${n.Timestamp}`);
     });
 
   } catch (err) {
-    await Log("backend", "error", "controller", `Priority inbox failed: ${err.message}`);
-    console.error("Error:", err.message);
+    await Log("backend", "error", "controller", `something went wrong in notification inbox: ${err.message}`);
+    console.error("error:", err.message);
   }
 }
 
-run();
+main();

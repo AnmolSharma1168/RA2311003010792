@@ -1,46 +1,50 @@
 const axios = require("axios");
 const { Log } = require("../logging_middleware/index");
-const { AUTH_CONFIG, BASE_URL } = require("../logging_middleware/config");
+const { CREDENTIALS, SERVER_URL } = require("../logging_middleware/config");
 
-let cachedToken = null;
-let tokenExpiry = 0;
+let activeToken = null;
+let expiresAt = 0;
 
-async function getAuthToken() {
+// refresh token if expired, otherwise use the cached one
+async function fetchToken() {
   const now = Math.floor(Date.now() / 1000);
-  if (cachedToken && now < tokenExpiry - 60) {
-    return cachedToken;
+  if (activeToken && now < expiresAt - 60) {
+    return activeToken;
   }
-  const response = await axios.post(`${BASE_URL}/auth`, {
-    email: AUTH_CONFIG.email,
-    name: AUTH_CONFIG.name,
-    rollNo: AUTH_CONFIG.rollNo,
-    accessCode: AUTH_CONFIG.accessCode,
-    clientID: AUTH_CONFIG.clientID,
-    clientSecret: AUTH_CONFIG.clientSecret,
+  const res = await axios.post(`${SERVER_URL}/auth`, {
+    email: CREDENTIALS.email,
+    name: CREDENTIALS.name,
+    rollNo: CREDENTIALS.rollNo,
+    accessCode: CREDENTIALS.accessCode,
+    clientID: CREDENTIALS.clientID,
+    clientSecret: CREDENTIALS.clientSecret,
   });
-  cachedToken = response.data.access_token;
-  tokenExpiry = response.data.expires_in;
-  return cachedToken;
+  activeToken = res.data.access_token;
+  expiresAt = res.data.expires_in;
+  return activeToken;
 }
 
-async function getDepots(token) {
-  await Log("backend", "info", "service", "Fetching depots from evaluation service");
-  const response = await axios.get(`${BASE_URL}/depots`, {
+// pull depot list — each depot has an hour budget we need for knapsack
+async function loadDepots(token) {
+  await Log("backend", "info", "service", "pulling depot list from server");
+  const res = await axios.get(`${SERVER_URL}/depots`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  await Log("backend", "info", "service", `Fetched ${response.data.depots.length} depots successfully`);
-  return response.data.depots;
+  await Log("backend", "info", "service", `got ${res.data.depots.length} depots back`);
+  return res.data.depots;
 }
 
-async function getVehicles(token) {
-  await Log("backend", "info", "service", "Fetching vehicles from evaluation service");
-  const response = await axios.get(`${BASE_URL}/vehicles`, {
+// pull vehicle task list — each task has a duration and impact score
+async function loadVehicles(token) {
+  await Log("backend", "info", "service", "pulling vehicle task list from server");
+  const res = await axios.get(`${SERVER_URL}/vehicles`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  await Log("backend", "info", "service", `Fetched ${response.data.vehicles.length} vehicle tasks successfully`);
-  return response.data.vehicles;
+  await Log("backend", "info", "service", `got ${res.data.vehicles.length} vehicle tasks back`);
+  return res.data.vehicles;
 }
 
+// classic 0/1 knapsack — pick tasks that maximize impact within hour limit
 function knapsack(tasks, capacity) {
   const n = tasks.length;
   const dp = Array(n + 1).fill(null).map(() => Array(capacity + 1).fill(0));
@@ -55,40 +59,42 @@ function knapsack(tasks, capacity) {
     }
   }
 
-  // Backtrack to find selected tasks
-  const selected = [];
+  // backtrack through dp table to figure out which tasks got picked
+  const picked = [];
+  let i = n;
   let w = capacity;
-  for (let i = n; i > 0; i--) {
+  while (i > 0 && w > 0) {
     if (dp[i][w] !== dp[i - 1][w]) {
-      selected.push(tasks[i - 1]);
+      picked.push(tasks[i - 1]);
       w -= tasks[i - 1].Duration;
     }
+    i--;
   }
 
   return {
     totalImpact: dp[n][capacity],
-    selectedTasks: selected,
+    selectedTasks: picked,
   };
 }
 
-async function runScheduler() {
+async function main() {
   try {
-    await Log("backend", "info", "controller", "Vehicle maintenance scheduler started");
+    await Log("backend", "info", "controller", "maintenance scheduler starting up");
 
-    const token = await getAuthToken();
-    const depots = await getDepots(token);
-    const vehicles = await getVehicles(token);
+    const token = await fetchToken();
+    const depots = await loadDepots(token);
+    const vehicles = await loadVehicles(token);
 
-    const results = [];
+    const output = [];
 
     for (const depot of depots) {
-      await Log("backend", "info", "controller", `Running knapsack for depot ${depot.ID} with ${depot.MechanicHours} mechanic hours`);
+      await Log("backend", "info", "controller", `running knapsack for depot ${depot.ID}, budget: ${depot.MechanicHours}hrs`);
 
       const { totalImpact, selectedTasks } = knapsack(vehicles, depot.MechanicHours);
 
-      await Log("backend", "info", "controller", `Depot ${depot.ID} optimal impact: ${totalImpact} with ${selectedTasks.length} tasks selected`);
+      await Log("backend", "info", "controller", `depot ${depot.ID} done — impact: ${totalImpact}, tasks picked: ${selectedTasks.length}`);
 
-      results.push({
+      output.push({
         depotID: depot.ID,
         mechanicHours: depot.MechanicHours,
         totalImpact,
@@ -96,15 +102,15 @@ async function runScheduler() {
       });
     }
 
-    console.log("\n===== VEHICLE MAINTENANCE SCHEDULER RESULTS =====\n");
-    console.log(JSON.stringify(results, null, 2));
+    console.log("\n--- Scheduler Results by Depot ---\n");
+    console.log(JSON.stringify(output, null, 2));
 
-    await Log("backend", "info", "controller", "Vehicle maintenance scheduler completed successfully");
+    await Log("backend", "info", "controller", "scheduler finished, all depots processed");
 
   } catch (err) {
-    await Log("backend", "error", "controller", `Scheduler failed: ${err.message}`);
-    console.error("Error:", err.message);
+    await Log("backend", "error", "controller", `scheduler hit an error: ${err.message}`);
+    console.error("something went wrong:", err.message);
   }
 }
 
-runScheduler();
+main();

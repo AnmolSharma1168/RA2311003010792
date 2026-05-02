@@ -1,4 +1,4 @@
-const AUTH_CONFIG = {
+const CREDENTIALS = {
   email: "as0592@srmist.edu.in",
   name: "Anmol Sharma",
   rollNo: "RA2311003010792",
@@ -7,6 +7,7 @@ const AUTH_CONFIG = {
   clientSecret: "FUzCzdanxnuQsgnt",
 };
 
-const BASE_URL = "http://20.207.122.201/evaluation-service";
+// base url 
+const SERVER_URL = "http://20.207.122.201/evaluation-service";
 
-module.exports = { AUTH_CONFIG, BASE_URL };
+module.exports = { CREDENTIALS, SERVER_URL };

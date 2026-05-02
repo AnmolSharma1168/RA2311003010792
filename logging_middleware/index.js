@@ -1,45 +1,47 @@
 const axios = require("axios");
-const { AUTH_CONFIG, BASE_URL } = require("./config");
+const { CREDENTIALS, SERVER_URL } = require("./config");
 
-let cachedToken = null;
-let tokenExpiry = 0;
+let activeToken = null;
+let expiresAt = 0;
 
-async function getAuthToken() {
+// fetches fresh token or returns the one if it is valid
+async function fetchToken() {
   const now = Math.floor(Date.now() / 1000);
-  if (cachedToken && now < tokenExpiry - 60) {
-    return cachedToken;
+  if (activeToken && now < expiresAt - 60) {
+    return activeToken;
   }
-  const response = await axios.post(`${BASE_URL}/auth`, {
-    email: AUTH_CONFIG.email,
-    name: AUTH_CONFIG.name,
-    rollNo: AUTH_CONFIG.rollNo,
-    accessCode: AUTH_CONFIG.accessCode,
-    clientID: AUTH_CONFIG.clientID,
-    clientSecret: AUTH_CONFIG.clientSecret,
+  const res = await axios.post(`${SERVER_URL}/auth`, {
+    email: CREDENTIALS.email,
+    name: CREDENTIALS.name,
+    rollNo: CREDENTIALS.rollNo,
+    accessCode: CREDENTIALS.accessCode,
+    clientID: CREDENTIALS.clientID,
+    clientSecret: CREDENTIALS.clientSecret,
   });
-  cachedToken = response.data.access_token;
-  tokenExpiry = response.data.expires_in;
-  return cachedToken;
+  activeToken = res.data.access_token;
+  expiresAt = res.data.expires_in;
+  return activeToken;
 }
 
 async function Log(stack, level, pkg, message) {
-  const validStacks = ["backend", "frontend"];
-  const validLevels = ["debug", "info", "warn", "error", "fatal"];
-  const validPackages = [
+  const allowedStacks = ["backend", "frontend"];
+  const allowedLevels = ["debug", "info", "warn", "error", "fatal"];
+  const allowedPackages = [
     "cache", "controller", "cron_job", "db", "domain",
     "handler", "repository", "route", "service",
     "api", "component", "hook", "page", "state", "style",
     "auth", "config", "middleware", "utils",
   ];
 
-  if (!validStacks.includes(stack)) return;
-  if (!validLevels.includes(level)) return;
-  if (!validPackages.includes(pkg)) return;
+  // skip if any value is outside the allowed list
+  if (!allowedStacks.includes(stack)) return;
+  if (!allowedLevels.includes(level)) return;
+  if (!allowedPackages.includes(pkg)) return;
 
   try {
-    const token = await getAuthToken();
+    const token = await fetchToken();
     await axios.post(
-      `${BASE_URL}/logs`,
+      `${SERVER_URL}/logs`,
       { stack, level, package: pkg, message },
       {
         headers: {
@@ -49,7 +51,7 @@ async function Log(stack, level, pkg, message) {
       }
     );
   } catch (err) {
-    // Silent fail — logging must never crash the application
+    // never let a logging failure break the main app
   }
 }
 

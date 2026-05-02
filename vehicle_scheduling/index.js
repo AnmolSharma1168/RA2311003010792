@@ -63,12 +63,11 @@ function knapsack(tasks, capacity) {
   const picked = [];
   let i = n;
   let w = capacity;
-  while (i > 0 && w > 0) {
+  for (; i > 0; i--) {
     if (dp[i][w] !== dp[i - 1][w]) {
       picked.push(tasks[i - 1]);
       w -= tasks[i - 1].Duration;
     }
-    i--;
   }
 
   return {
@@ -91,6 +90,10 @@ async function main() {
       await Log("backend", "info", "controller", `running knapsack for depot ${depot.ID}, budget: ${depot.MechanicHours}hrs`);
 
       const { totalImpact, selectedTasks } = knapsack(vehicles, depot.MechanicHours);
+
+      if (selectedTasks.length === 0) {
+        await Log("backend", "warn", "controller", `depot ${depot.ID} had no tasks fitting within ${depot.MechanicHours}hr budget`);
+      }
 
       await Log("backend", "info", "controller", `depot ${depot.ID} done — impact: ${totalImpact}, tasks picked: ${selectedTasks.length}`);
 
